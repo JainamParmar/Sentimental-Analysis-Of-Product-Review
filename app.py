@@ -8,19 +8,10 @@ Date: March 2026
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle
 import re
 import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-from nltk.stem import WordNetLemmatizer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.svm import LinearSVC
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import matplotlib.pyplot as plt
-import seaborn as sns
-from wordcloud import WordCloud
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -28,19 +19,9 @@ warnings.filterwarnings('ignore')
 # DOWNLOAD NLTK DATA
 # ============================================================================
 try:
-    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('sentiment/vader_lexicon.zip')
 except LookupError:
-    nltk.download('punkt')
-    
-try:
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('stopwords')
-    
-try:
-    nltk.data.find('corpora/wordnet')
-except LookupError:
-    nltk.download('wordnet')
+    nltk.download('vader_lexicon')
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -115,175 +96,73 @@ SENTIMENT_EMOJI = {'Neutral': '◐', 'Positive': '✓', 'Negative': '✗'}
 SENTIMENT_COLOR = {'Positive': '#28a745', 'Negative': '#dc3545', 'Neutral': '#6c757d'}
 
 # ============================================================================
-# PREPROCESSING FUNCTIONS
+# VADER SENTIMENT ANALYZER
 # ============================================================================
 @st.cache_resource
-def load_lemmatizer():
-    """Load and cache the lemmatizer"""
-    return WordNetLemmatizer()
+def load_vader():
+    """Load and cache the VADER sentiment analyzer"""
+    return SentimentIntensityAnalyzer()
 
-def preprocess_text(text):
+def analyze_sentiment(text):
     """
-    Complete text preprocessing pipeline
-    
-    Steps:
-    1. Lowercase conversion
-    2. Remove URLs, emails, special characters
-    3. Tokenization
-    4. Stopword removal
-    5. Lemmatization
-    
+    Analyze sentiment using VADER (Valence Aware Dictionary and sEntiment Reasoner).
+    VADER is a rule-based NLP tool specifically tuned for product and social reviews.
+    It correctly handles words like 'good', 'bad', 'not good', 'hate', 'terrible'.
+
     Parameters:
     -----------
     text : str
         Raw review text
-        
+
     Returns:
     --------
-    str
-        Processed text
+    dict with keys:
+        - sentiment_label : str  ('Positive', 'Negative', 'Neutral')
+        - compound        : float  raw VADER compound score (-1 to +1)
+        - positive_pct    : float  % positive
+        - negative_pct    : float  % negative
+        - neutral_pct     : float  % neutral
+        - confidence      : float  confidence % (0-100)
     """
-    lemmatizer = load_lemmatizer()
-    
-    # Step 1: Lowercase
-    text = text.lower()
-    
-    # Step 2: Remove URLs
-    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-    
-    # Step 3: Remove emails
-    text = re.sub(r'\S+@\S+', '', text)
-    
-    # Step 4: Remove special characters and keep only alphanumeric and spaces
-    text = re.sub(r'[^\w\s]', '', text)
-    
-    # Step 5: Tokenization
-    tokens = word_tokenize(text)
-    
-    # Step 6: Remove stopwords and short tokens
-    stop_words = set(stopwords.words('english'))
-    tokens = [word for word in tokens if word not in stop_words and len(word) > 2]
-    
-    # Step 7: Lemmatization
-    tokens = [lemmatizer.lemmatize(word) for token in tokens]
-    
-    return ' '.join(tokens)
+    sia = load_vader()
+    scores = sia.polarity_scores(text)
 
-# Fix the bug in preprocessing
-def preprocess_text(text):
-    """Fixed text preprocessing pipeline"""
-    lemmatizer = load_lemmatizer()
-    
-    text = text.lower()
-    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\S+@\S+', '', text)
-    text = re.sub(r'[^\w\s]', '', text)
-    tokens = word_tokenize(text)
-    stop_words = set(stopwords.words('english'))
-    tokens = [word for word in tokens if word not in stop_words and len(word) > 2]
-    tokens = [lemmatizer.lemmatize(word) for word in tokens]
-    
-    return ' '.join(tokens)
+    compound = scores['compound']
+    pos = scores['pos'] * 100
+    neg = scores['neg'] * 100
+    neu = scores['neu'] * 100
 
-# ============================================================================
-# MODEL INITIALIZATION AND TRAINING
-# ============================================================================
-@st.cache_resource
-def initialize_models():
-    """
-    Initialize and train sentiment analysis models
-    Creates sample data and trains 3 classification models
-    
-    Returns:
-    --------
-    tuple
-        (trained_model, fitted_vectorizer)
-    """
-    
-    # Sample dataset - 30 reviews with 3 sentiment classes
-    sample_reviews = {
-        'review_text': [
-            # Positive reviews (1)
-            "This product is absolutely amazing! Best purchase ever!",
-            "Excellent quality and fast shipping. Very satisfied!",
-            "Love it! Works perfectly. Highly recommended!",
-            "Outstanding product! Exceeded expectations!",
-            "Fantastic item! Great craftsmanship!",
-            "Incredible! Best in its category!",
-            "Perfect! Exactly what I needed!",
-            "Amazing quality! Worth every penny!",
-            "Exceptional product! Couldn't be happier!",
-            "Great product! Works as advertised!",
-            
-            # Negative reviews (2)
-            "Terrible quality. Broke after one week.",
-            "Very disappointed. Does not work as advertised.",
-            "Awful experience. Poor quality.",
-            "Worst purchase ever! Total waste.",
-            "Defective product. Complete disaster.",
-            "Horrible! Don't buy this garbage!",
-            "Worst ever! Complete failure!",
-            "Poor quality, doesn't work at all.",
-            "Terrible! Not worth the price.",
-            "Awful product. Waste of money.",
-            
-            # Neutral reviews (0)
-            "The product is okay. Nothing special.",
-            "It's average. Not great, not terrible.",
-            "Decent product. Works as expected.",
-            "It's fine. Standard quality.",
-            "Acceptable but could be better.",
-            "Standard product. Average quality.",
-            "Not impressive but functional.",
-            "It's acceptable. Nothing impressive.",
-            "Okay product. Average performance.",
-            "Decent but nothing extraordinary.",
-        ],
-        'sentiment': [
-            # Positive
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            # Negative
-            2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            # Neutral
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-        ]
+    # Standard VADER thresholds
+    if compound >= 0.05:
+        label = 'Positive'
+        confidence = min(100.0, 50 + compound * 50)
+    elif compound <= -0.05:
+        label = 'Negative'
+        confidence = min(100.0, 50 + abs(compound) * 50)
+    else:
+        label = 'Neutral'
+        confidence = max(50.0, neu)
+
+    return {
+        'sentiment_label': label,
+        'compound': compound,
+        'positive_pct': pos,
+        'negative_pct': neg,
+        'neutral_pct': neu,
+        'confidence': confidence,
     }
-    
-    # Create DataFrame
-    df = pd.DataFrame(sample_reviews)
-    
-    # Preprocess all reviews
-    df['processed_text'] = df['review_text'].apply(preprocess_text)
-    
-    # Create TF-IDF vectorizer
-    vectorizer = TfidfVectorizer(
-        max_features=5000,
-        max_df=0.8,
-        min_df=1,
-        ngram_range=(1, 2),
-        strip_accents='unicode',
-        lowercase=True,
-        stop_words='english'
-    )
-    
-    # Fit and transform
-    X = vectorizer.fit_transform(df['processed_text'])
-    y = df['sentiment'].values
-    
-    # Train Logistic Regression (default model for speed)
-    model = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
-    model.fit(X, y)
-    
-    return model, vectorizer
+
+# (No training needed — VADER is a pre-built rule-based analyzer)
+
 
 # ============================================================================
 # MAIN APPLICATION
 # ============================================================================
 def main():
     """Main Streamlit application"""
-    
-    # Initialize models
-    model, vectorizer = initialize_models()
+
+    # Pre-load VADER so it is cached for the session
+    load_vader()
     
     # Sidebar Navigation
     with st.sidebar:
@@ -299,11 +178,11 @@ def main():
         st.markdown("### ⚙️ About")
         st.info("""
         **Sentiment Analysis System**
-        
-        - **Models**: Logistic Regression
-        - **Features**: TF-IDF (5000)
+
+        - **Engine**: VADER (NLTK)
+        - **Type**: Rule-based NLP
         - **Classes**: 3 (Positive, Negative, Neutral)
-        - **Accuracy**: ~88%
+        - **No training data needed**
         """)
     
     # ====================================================================
@@ -412,13 +291,25 @@ def main():
     elif page == "📝 Analyze Review":
         st.markdown("<h1 style='text-align: center;'>📝 Analyze Customer Review</h1>", unsafe_allow_html=True)
         st.markdown("---")
-        
-        # Text input
+
+        # Helper: rerun compatible with both old and new Streamlit
+        def safe_rerun():
+            if hasattr(st, 'rerun'):
+                st.rerun()
+            else:
+                st.experimental_rerun()
+
+        # Initialize session state for example text
+        if 'example_text' not in st.session_state:
+            st.session_state['example_text'] = ''
+
+        # Text input — pre-fill with example if button was pressed
         review_text = st.text_area(
             label="Enter your review:",
             placeholder="Type a customer review here... (e.g., 'This product is amazing!' or 'Terrible quality')",
             height=150,
-            key="review_input"
+            key="review_input",
+            value=st.session_state['example_text']
         )
         
         # Buttons
@@ -434,33 +325,31 @@ def main():
             example_button = st.button("📋 Example", use_container_width=True, key="example_btn")
         
         with col4:
-            length_info = st.write(f"Characters: {len(review_text)}")
+            st.write(f"Characters: {len(review_text)}")
         
         # Clear button logic
         if clear_button:
-            st.rerun()
+            st.session_state['example_text'] = ''
+            safe_rerun()
         
         # Example button logic
         if example_button:
-            review_text = "This product is absolutely amazing! Best purchase ever. Highly recommended!"
-            st.rerun()
+            st.session_state['example_text'] = "This product is absolutely amazing! Best purchase ever. Highly recommended!"
+            safe_rerun()
         
         # Analyze button logic
         if analyze_button and review_text.strip():
             with st.spinner("🔄 Analyzing sentiment..."):
-                # Preprocess
-                processed_text = preprocess_text(review_text)
-                
-                # Vectorize
-                features = vectorizer.transform([processed_text])
-                
-                # Predict
-                prediction = model.predict(features)[0]
-                confidence_scores = model.predict_proba(features)[0]
-                confidence = max(confidence_scores) * 100
-                
-                # Map to sentiment
-                sentiment_label = SENTIMENT_MAPPING[prediction]
+                # Run VADER analysis on the raw text
+                result = analyze_sentiment(review_text)
+
+                sentiment_label = result['sentiment_label']
+                confidence      = result['confidence']
+                compound        = result['compound']
+                pos_pct         = result['positive_pct']
+                neg_pct         = result['negative_pct']
+                neu_pct         = result['neutral_pct']
+
                 emoji = SENTIMENT_EMOJI[sentiment_label]
                 color = SENTIMENT_COLOR[sentiment_label]
                 
@@ -493,48 +382,43 @@ def main():
                         st.warning("◐ Neutral Review", icon="⚠️")
                 
                 st.markdown("---")
-                
+
                 # Detailed information
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
                     st.markdown("### 📌 Review Details")
-                    st.write(f"**Original Text:**")
+                    st.write("**Original Text:**")
                     st.info(f'"{review_text}"')
-                    st.write(f"**Processed Text:**")
-                    st.info(f'"{processed_text}"')
                     st.write(f"""
                     **Statistics:**
-                    - Original Word Count: {len(review_text.split())} words
-                    - Processed Token Count: {len(processed_text.split())} tokens
+                    - Word Count: {len(review_text.split())} words
                     - Character Count: {len(review_text)} characters
+                    - VADER Compound Score: {compound:.4f}
                     """)
-                
+
                 with col2:
                     st.markdown("### 🎯 Confidence Breakdown")
-                    
-                    # Confidence scores for each class
+
                     confidence_dict = {
-                        'Neutral': confidence_scores[0] * 100,
-                        'Positive': confidence_scores[1] * 100,
-                        'Negative': confidence_scores[2] * 100
+                        'Positive': pos_pct,
+                        'Negative': neg_pct,
+                        'Neutral':  neu_pct,
                     }
-                    
-                    # Sort by confidence
                     sorted_conf = sorted(confidence_dict.items(), key=lambda x: x[1], reverse=True)
-                    
-                    for sentiment, conf in sorted_conf:
-                        st.write(f"**{sentiment}**: {conf:.2f}%")
+
+                    for sent, conf in sorted_conf:
+                        st.write(f"**{sent}**: {conf:.2f}%")
                         st.progress(conf / 100)
                 
                 # Visualization
                 st.markdown("---")
                 st.markdown("### 📊 Visualization")
-                
+
                 fig, ax = plt.subplots(figsize=(10, 5))
-                sentiments = ['Neutral', 'Positive', 'Negative']
-                probs = [confidence_scores[0] * 100, confidence_scores[1] * 100, confidence_scores[2] * 100]
-                colors_list = ['#6c757d', '#28a745', '#dc3545']
+                sentiments  = ['Positive', 'Negative', 'Neutral']
+                probs       = [pos_pct, neg_pct, neu_pct]
+                colors_list = ['#28a745', '#dc3545', '#6c757d']
                 
                 bars = ax.barh(sentiments, probs, color=colors_list)
                 ax.set_xlabel('Confidence Score (%)', fontsize=12, fontweight='bold')
@@ -636,23 +520,17 @@ def main():
                             for idx, row in df.iterrows():
                                 # Get review
                                 review = str(row['review'])
-                                
-                                # Preprocess
-                                processed = preprocess_text(review)
-                                
-                                # Vectorize
-                                features = vectorizer.transform([processed])
-                                
-                                # Predict
-                                pred = model.predict(features)[0]
-                                conf = max(model.predict_proba(features)[0]) * 100
-                                
+
+                                # Analyze with VADER
+                                result = analyze_sentiment(review)
+
                                 results.append({
-                                    'Review': review,
-                                    'Sentiment': SENTIMENT_MAPPING[pred],
-                                    'Confidence': f"{conf:.2f}%"
+                                    'Review':     review,
+                                    'Sentiment':  result['sentiment_label'],
+                                    'Confidence': f"{result['confidence']:.2f}%",
+                                    'Compound':   f"{result['compound']:.4f}",
                                 })
-                                
+
                                 # Update progress
                                 progress_bar.progress((idx + 1) / len(df))
                             
